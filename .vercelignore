@@ -1,0 +1,11 @@
+# Ignore heavy local files not needed on Vercel
+backend/train.py
+models/*.pth
+dataset_raw/
+__pycache__/
+*.pyc
+.git/
+tests/
+run.bat
+streamlit_app.py
+# Keep models/training_metrics.json and static/training_plot.png

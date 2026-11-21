@@ -1,0 +1,71 @@
+[
+  {
+    "id": 1,
+    "filename": "sample_1.jpg",
+    "path": "C:\\Users\\pc\\Downloads\\dental detection1\\dataset_raw\\sample_1.jpg",
+    "labels": [
+      0,
+      0,
+      0
+    ],
+    "conditions": [
+      "Healthy / Intact Dentition"
+    ],
+    "has_caries": false,
+    "has_periapical_lesion": false,
+    "has_periodontitis": false,
+    "is_healthy": true
+  },
+  {
+    "id": 2,
+    "filename": "sample_1.jpg",
+    "path": "C:\\Users\\pc\\Downloads\\dental detection1\\dataset_raw\\sample_1.jpg",
+    "labels": [
+      0,
+      0,
+      0
+    ],
+    "conditions": [
+      "Healthy / Intact Dentition"
+    ],
+    "has_caries": false,
+    "has_periapical_lesion": false,
+    "has_periodontitis": false,
+    "is_healthy": true
+  },
+  {
+    "id": 3,
+    "filename": "sample_2.png",
+    "path": "C:\\Users\\pc\\Downloads\\dental detection1\\dataset_raw\\sample_2.png",
+    "labels": [
+      0,
+      1,
+      0
+    ],
+    "conditions": [
+      "Periapical Lesion"
+    ],
+    "has_caries": false,
+    "has_periapical_lesion": true,
+    "has_periodontitis": false,
+    "is_healthy": false
+  },
+  {
+    "id": 4,
+    "filename": "sample_3.png",
+    "path": "C:\\Users\\pc\\Downloads\\dental detection1\\dataset_raw\\sample_3.png",
+    "labels": [
+      1,
+      1,
+      0
+    ],
+    "conditions": [
+      "Dental Caries",
+      "Periapical Lesion"
+    ],
+    "has_caries": true,
+    "has_periapical_lesion": true,
+    "has_periodontitis": false,
+    "is_healthy": false
+  }
+]

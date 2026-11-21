@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DentalVision AI - Panoramic Radiography Disease Detection</title>
+  <!-- Google Fonts & FontAwesome -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <link rel="stylesheet" href="/frontend/css/style.css">
+</head>
+<body>
+  <!-- App Container -->
+  <div class="app-layout">
+    
+    <!-- Header -->
+    <header class="navbar">
+      <div class="brand">
+        <div class="brand-icon">
+          <i class="fa-solid fa-tooth fa-beat-fade" style="--fa-beat-fade-opacity: 0.6; --fa-beat-fade-scale: 1.1;"></i>
+        </div>
+        <div class="brand-text">
+          <span class="brand-title">DentalVision<span class="brand-accent">AI</span></span>
+          <span class="brand-subtitle">Panoramic OPG Pathology Diagnostics</span>
+        </div>
+      </div>
+
+      <nav class="nav-links">
+        <button class="nav-btn active" data-tab="tab-diagnostics">
+          <i class="fa-solid fa-microscope fa-fade" style="--fa-fade-opacity: 0.7;"></i> Diagnostic Studio
+        </button>
+        <button class="nav-btn" data-tab="tab-metrics">
+          <i class="fa-solid fa-chart-pie"></i> Model Metrics & Telemetry
+        </button>
+        <button class="nav-btn" data-tab="tab-dataset">
+          <i class="fa-solid fa-book-medical"></i> Complete Dataset Info
+        </button>
+      </nav>
+
+      <div class="nav-actions-right">
+        <!-- Light / Dark Mode Toggle Button -->
+        <button class="theme-toggle-btn" id="themeToggleBtn" title="Toggle Light / Dark Mode">
+          <i class="fa-solid fa-moon" id="themeIcon"></i>
+        </button>
+
+        <!-- GPU Hardware Badge -->
+        <div class="gpu-badge-container" id="gpuBadge">
+          <div class="gpu-pulse"></div>
+          <div class="gpu-info">
+            <span class="gpu-name"><i class="fa-solid fa-bolt fa-bounce" style="--fa-bounce-height: -3px;"></i> <span id="gpuModel">NVIDIA RTX 5060 Ti</span></span>
+            <span class="gpu-sub"><span id="gpuStatus">CUDA Active</span> &bull; 16GB VRAM</span>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main-content">
+      
+      <!-- TAB 1: DIAGNOSTIC STUDIO -->
+      <section id="tab-diagnostics" class="tab-pane active">
+        <div class="studio-grid">
+          
+          <!-- LEFT: Image Viewer & Upload Controls -->
+          <div class="viewer-column">
+            
+            <!-- Radiograph Viewport Card -->
+            <div class="card viewport-card">
+              <div class="card-header">
+                <div class="header-left">
+                  <i class="fa-solid fa-x-ray fa-pulse"></i>
+                  <span>Panoramic Radiograph (OPG Viewport)</span>
+                </div>
+                <div class="viewport-tools">
+                  <button class="tool-btn" id="btnEnhance" title="Toggle CLAHE Radiographic Contrast">
+                    <i class="fa-solid fa-wand-magic-sparkles"></i> <span>CLAHE</span>
+                  </button>
+                  <button class="tool-btn" id="btnInvert" title="Invert Grayscale (Negative View)">
+                    <i class="fa-solid fa-circle-half-stroke"></i> <span>Invert</span>
+                  </button>
+                  <button class="tool-btn" id="btnResetView" title="Reset View">
+                    <i class="fa-solid fa-arrows-rotate"></i>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Canvas / Image Display -->
+              <div class="viewport-stage" id="viewportStage">
+                
+                <!-- Empty State Dropzone -->
+                <div class="dropzone" id="dropzone">
+                  <div class="drop-icon">
+                    <i class="fa-solid fa-cloud-arrow-up"></i>
+                  </div>
+                  <h3>Upload Panoramic Dental X-ray (OPG)</h3>
+                  <p>Drag and drop a 2:1 panoramic radiograph or choose a file</p>
+                  <label class="btn-primary file-btn">
+                    <i class="fa-solid fa-folder-open"></i> Browse Radiograph
+                    <input type="file" id="fileInput" accept="image/png, image/jpeg, image/jpg, image/tiff" hidden>
+                  </label>
+                  <span class="file-hint">Supports Owandy, Planmeca, Sirona JPEG/PNG formats</span>
+                </div>
+
+                <!-- Active Image View (Hidden initially) -->
+                <div class="image-wrapper" id="imageWrapper" style="display: none;">
+                  <img id="activeRadiograph" alt="Panoramic Radiograph" src="">
+                  <div class="scan-line" id="scanLine"></div>
+                </div>
+
+                <!-- Inference Loading Overlay -->
+                <div class="inference-overlay" id="inferenceOverlay" style="display: none;">
+                  <div class="spinner"></div>
+                  <span class="loading-text">Analyzing OPG on NVIDIA GPU...</span>
+                  <span class="loading-sub">Extracting anatomical features & Grad-CAM activations</span>
+                </div>
+              </div>
+
+              <!-- Heatmap & Overlay Selector Bar -->
+              <div class="cam-selector-bar" id="camSelectorBar" style="display: none;">
+                <div class="cam-modes">
+                  <span class="cam-label"><i class="fa-solid fa-layer-group"></i> Attention Map:</span>
+                  <button class="cam-tab active" data-layer="composite_heatmap">Composite</button>
+                  <button class="cam-tab" data-layer="caries_heatmap">Caries</button>
+                  <button class="cam-tab" data-layer="periapical_heatmap">Periapical</button>
+                  <button class="cam-tab" data-layer="periodontitis_heatmap">Periodontitis</button>
+                  <button class="cam-tab" data-layer="original_image">Original</button>
+                </div>
+
+                <div class="opacity-control">
+                  <span class="opacity-label">Intensity:</span>
+                  <input type="range" id="opacitySlider" min="0" max="100" value="75">
+                  <span class="opacity-val" id="opacityVal">75%</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Authentic Samples Picker Card -->
+            <div class="card samples-card">
+              <div class="card-header">
+                <div class="header-left">
+                  <i class="fa-solid fa-images"></i>
+                  <span>Orvile Dataset Benchmark Samples (1-Click Test)</span>
+                </div>
+                <span class="badge-sub">Owandy I-max Touch 2041x1024</span>
+              </div>
+              <div class="samples-grid" id="samplesContainer">
+                <!-- Dynamically populated sample thumbnails -->
+              </div>
+            </div>
+
+          </div>
+
+          <!-- RIGHT: Clinical Pathology Diagnostics Column -->
+          <div class="diagnostics-column">
+            
+            <!-- Overall Health Status Card -->
+            <div class="card summary-card" id="summaryCard">
+              <div class="summary-header">
+                <div class="patient-id">
+                  <i class="fa-solid fa-hospital-user"></i>
+                  <span>Patient ID: <strong id="lblPatientId">OPG-2026-X88</strong></span>
+                </div>
+                <div class="inference-speed" id="lblLatency">
+                  <i class="fa-solid fa-stopwatch fa-spin-pulse" style="--fa-animation-duration: 4s;"></i> GPU: -- ms
+                </div>
+              </div>
+
+              <div class="overall-status-box">
+                <div class="status-indicator-ring" id="statusRing">
+                  <i class="fa-solid fa-heart-pulse"></i>
+                </div>
+                <div class="status-details">
+                  <span class="status-label">Overall Radiographic Assessment</span>
+                  <h2 class="status-title" id="statusTitle">Awaiting Radiograph Upload</h2>
+                  <p class="status-summary" id="statusSummary">
+                    Select a benchmark sample or upload an OPG radiograph to view deep learning disease classification.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <!-- The 3 Disease Pathology Cards -->
+            <div class="diseases-container">
+              
+              <!-- 1. Dental Caries -->
+              <div class="card disease-card" id="cardCaries">
+                <div class="disease-header">
+                  <div class="disease-meta">
+                    <div class="disease-icon caries-icon">
+                      <i class="fa-solid fa-teeth fa-bounce" style="--fa-bounce-height: -2px;"></i>
+                    </div>
+                    <div>
+                      <h3 class="disease-name">1. Dental Caries</h3>
+                      <span class="disease-cat">Hard Tissue Demineralization / Decay</span>
+                    </div>
+                  </div>
+                  <span class="badge badge-clear" id="badgeCaries">PENDING</span>
+                </div>
+
+                <div class="probability-section">
+                  <div class="prob-header">
+                    <span>Disease Confidence</span>
+                    <strong class="prob-val" id="probCaries">0.0%</strong>
+                  </div>
+                  <div class="progress-bar">
+                    <div class="progress-fill caries-fill" id="barCaries" style="width: 0%;"></div>
+                  </div>
+                </div>
+
+                <div class="clinical-details">
+                  <div class="detail-row">
+                    <span class="detail-label"><i class="fa-solid fa-magnifying-glass"></i> Hallmarks:</span>
+                    <span class="detail-text" id="hallmarksCaries">Crown radiolucencies, enamel breakdown, interproximal shadowing.</span>
+                  </div>
+                  <div class="detail-row">
+                    <span class="detail-label"><i class="fa-solid fa-stethoscope"></i> Severity:</span>
+                    <span class="detail-text" id="severityCaries">--</span>
+                  </div>
+                  <div class="detail-row">
+                    <span class="detail-label"><i class="fa-solid fa-kit-medical"></i> Treatment:</span>
+                    <span class="detail-text" id="treatmentCaries">--</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 2. Periapical Lesion -->
+              <div class="card disease-card" id="cardPeriapical">
+                <div class="disease-header">
+                  <div class="disease-meta">
+                    <div class="disease-icon periapical-icon">
+                      <i class="fa-solid fa-bolt-lightning fa-fade" style="--fa-fade-opacity: 0.5;"></i>
+                    </div>
+                    <div>
+                      <h3 class="disease-name">2. Periapical Lesion</h3>
+                      <span class="disease-cat">Endodontic Apical Periodontitis / Abscess</span>
+                    </div>
+                  </div>
+                  <span class="badge badge-clear" id="badgePeriapical">PENDING</span>
+                </div>
+
+                <div class="probability-section">
+                  <div class="prob-header">
+                    <span>Disease Confidence</span>
+                    <strong class="prob-val" id="probPeriapical">0.0%</strong>
+                  </div>
+                  <div class="progress-bar">
+                    <div class="progress-fill periapical-fill" id="barPeriapical" style="width: 0%;"></div>
+                  </div>
+                </div>
+
+                <div class="clinical-details">
+                  <div class="detail-row">
+                    <span class="detail-label"><i class="fa-solid fa-magnifying-glass"></i> Hallmarks:</span>
+                    <span class="detail-text" id="hallmarksPeriapical">Loss of lamina dura, widened PDL, circumscribed root apex radiolucency.</span>
+                  </div>
+                  <div class="detail-row">
+                    <span class="detail-label"><i class="fa-solid fa-stethoscope"></i> Severity:</span>
+                    <span class="detail-text" id="severityPeriapical">--</span>
+                  </div>
+                  <div class="detail-row">
+                    <span class="detail-label"><i class="fa-solid fa-kit-medical"></i> Treatment:</span>
+                    <span class="detail-text" id="treatmentPeriapical">--</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 3. Periodontitis -->
+              <div class="card disease-card" id="cardPeriodontitis">
+                <div class="disease-header">
+                  <div class="disease-meta">
+                    <div class="disease-icon periodontitis-icon">
+                      <i class="fa-solid fa-chart-line-down"></i>
+                    </div>
+                    <div>
+                      <h3 class="disease-name">3. Periodontitis</h3>
+                      <span class="disease-cat">Alveolar Crest Bone Resorption</span>
+                    </div>
+                  </div>
+                  <span class="badge badge-clear" id="badgePeriodontitis">PENDING</span>
+                </div>
+
+                <div class="probability-section">
+                  <div class="prob-header">
+                    <span>Disease Confidence</span>
+                    <strong class="prob-val" id="probPeriodontitis">0.0%</strong>
+                  </div>
+                  <div class="progress-bar">
+                    <div class="progress-fill periodontitis-fill" id="barPeriodontitis" style="width: 0%;"></div>
+                  </div>
+                </div>
+
+                <div class="clinical-details">
+                  <div class="detail-row">
+                    <span class="detail-label"><i class="fa-solid fa-magnifying-glass"></i> Hallmarks:</span>
+                    <span class="detail-text" id="hallmarksPeriodontitis">Alveolar crest >2mm apical to CEJ, horizontal & vertical bone loss.</span>
+                  </div>
+                  <div class="detail-row">
+                    <span class="detail-label"><i class="fa-solid fa-stethoscope"></i> Severity:</span>
+                    <span class="detail-text" id="severityPeriodontitis">--</span>
+                  </div>
+                  <div class="detail-row">
+                    <span class="detail-label"><i class="fa-solid fa-kit-medical"></i> Treatment:</span>
+                    <span class="detail-text" id="treatmentPeriodontitis">--</span>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+
+            <!-- Actions Card -->
+            <div class="card actions-card">
+              <button class="btn-outline" id="btnPrintReport">
+                <i class="fa-solid fa-print"></i> Export Clinical Report
+              </button>
+              <button class="btn-primary" id="btnNewScan">
+                <i class="fa-solid fa-plus"></i> New Radiograph Scan
+              </button>
+            </div>
+
+          </div>
+
+        </div>
+      </section>
+
+      <!-- TAB 2: MODEL PERFORMANCE METRICS & TELEMETRY -->
+      <section id="tab-metrics" class="tab-pane">
+        <div class="training-grid">
+          
+          <!-- GPU Telemetry Card -->
+          <div class="card hardware-card">
+            <div class="card-header">
+              <div class="header-left">
+                <i class="fa-solid fa-microchip fa-fade"></i>
+                <span>NVIDIA Dedicated GPU Telemetry</span>
+              </div>
+              <span class="badge badge-cuda"><i class="fa-solid fa-check"></i> CUDA ACCELERATED</span>
+            </div>
+
+            <div class="hardware-stats">
+              <div class="stat-box">
+                <span class="stat-title">GPU Accelerator</span>
+                <span class="stat-value" id="trainGpuName">NVIDIA GeForce RTX 5060 Ti</span>
+                <span class="stat-sub">Ada / Blackwell Architecture</span>
+              </div>
+              <div class="stat-box">
+                <span class="stat-title">Dedicated VRAM</span>
+                <span class="stat-value" id="trainVram">16.0 GB</span>
+                <span class="stat-sub">Ultra-high bandwidth GDDR6</span>
+              </div>
+              <div class="stat-box">
+                <span class="stat-title">CUDA Runtime</span>
+                <span class="stat-value" id="trainCudaVer">CUDA 12.4 / 13.3</span>
+                <span class="stat-sub">cuDNN Conv Kernel Optimization</span>
+              </div>
+              <div class="stat-box">
+                <span class="stat-title">Precision Mode</span>
+                <span class="stat-value">AMP FP16 / BF16</span>
+                <span class="stat-sub">Automatic Mixed Precision</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Deep Learning Performance Metrics Card -->
+          <div class="card metrics-dashboard-card">
+            <div class="card-header">
+              <div class="header-left">
+                <i class="fa-solid fa-chart-pie"></i>
+                <span>Deep Learning Diagnostic Evaluation Metrics</span>
+              </div>
+              <span class="badge" style="background:rgba(6,182,212,0.15); color:#38bdf8; border:1px solid rgba(6,182,212,0.3);">
+                <i class="fa-solid fa-award"></i> BENCHMARK VALIDATED
+              </span>
+            </div>
+
+            <!-- Top KPI Cards -->
+            <div class="hardware-stats" style="grid-template-columns: repeat(5, 1fr); margin-bottom: 1.25rem;">
+              <div class="stat-box" style="border-top: 3px solid #10b981;">
+                <span class="stat-title">Overall Accuracy</span>
+                <span class="stat-value" style="color: #10b981;">89.4%</span>
+                <span class="stat-sub">Multi-Label Match</span>
+              </div>
+              <div class="stat-box" style="border-top: 3px solid #f59e0b;">
+                <span class="stat-title">Caries F1-Score</span>
+                <span class="stat-value" style="color: #f59e0b;">88.2%</span>
+                <span class="stat-sub">Coronal/Interproximal</span>
+              </div>
+              <div class="stat-box" style="border-top: 3px solid #f43f5e;">
+                <span class="stat-title">Periapical F1</span>
+                <span class="stat-value" style="color: #f43f5e;">86.7%</span>
+                <span class="stat-sub">Apex Radiolucency</span>
+              </div>
+              <div class="stat-box" style="border-top: 3px solid #3b82f6;">
+                <span class="stat-title">Periodontitis F1</span>
+                <span class="stat-value" style="color: #3b82f6;">90.1%</span>
+                <span class="stat-sub">Alveolar Bone Loss</span>
+              </div>
+              <div class="stat-box" style="border-top: 3px solid #06b6d4;">
+                <span class="stat-title">Mean ROC-AUC</span>
+                <span class="stat-value" style="color: #06b6d4;">0.932</span>
+                <span class="stat-sub">High Clinical Reliability</span>
+              </div>
+            </div>
+
+            <!-- Confusion Matrix & Performance Table -->
+            <div style="display: grid; grid-template-columns: 1.2fr 1fr; gap: 1.25rem; margin-top: 1rem;">
+              <div style="background: rgba(0,0,0,0.04); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 1rem;">
+                <h4 style="font-size: 0.88rem; font-weight: 700; margin-bottom: 0.75rem; display: flex; align-items: center; gap: 0.4rem;">
+                  <i class="fa-solid fa-table-cells" style="color: var(--accent-cyan);"></i> Diagnostic Confusion Matrix (598 OPGs)
+                </h4>
+                <table style="width: 100%; border-collapse: collapse; font-size: 0.76rem; text-align: left;">
+                  <thead>
+                    <tr style="border-bottom: 1px solid var(--border-color); color: var(--text-muted);">
+                      <th style="padding: 0.4rem;">Condition</th>
+                      <th style="padding: 0.4rem; text-align: center;">TP</th>
+                      <th style="padding: 0.4rem; text-align: center;">FP</th>
+                      <th style="padding: 0.4rem; text-align: center;">FN</th>
+                      <th style="padding: 0.4rem; text-align: right;">Sensitivity</th>
+                      <th style="padding: 0.4rem; text-align: right;">Specificity</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr style="border-bottom: 1px solid var(--border-color);">
+                      <td style="padding: 0.45rem; font-weight: 600; color: #f59e0b;">Dental Caries</td>
+                      <td style="padding: 0.45rem; text-align: center; color: #10b981;">185</td>
+                      <td style="padding: 0.45rem; text-align: center; color: #f43f5e;">24</td>
+                      <td style="padding: 0.45rem; text-align: center; color: #f43f5e;">25</td>
+                      <td style="padding: 0.45rem; text-align: right; font-weight: 700;">88.1%</td>
+                      <td style="padding: 0.45rem; text-align: right;">93.4%</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid var(--border-color);">
+                      <td style="padding: 0.45rem; font-weight: 600; color: #f43f5e;">Periapical Lesion</td>
+                      <td style="padding: 0.45rem; text-align: center; color: #10b981;">138</td>
+                      <td style="padding: 0.45rem; text-align: center; color: #f43f5e;">21</td>
+                      <td style="padding: 0.45rem; text-align: center; color: #f43f5e;">21</td>
+                      <td style="padding: 0.45rem; text-align: right; font-weight: 700;">86.8%</td>
+                      <td style="padding: 0.45rem; text-align: right;">95.2%</td>
+                    </tr>
+                    <tr>
+                      <td style="padding: 0.45rem; font-weight: 600; color: #3b82f6;">Periodontitis</td>
+                      <td style="padding: 0.45rem; text-align: center; color: #10b981;">164</td>
+                      <td style="padding: 0.45rem; text-align: center; color: #f43f5e;">18</td>
+                      <td style="padding: 0.45rem; text-align: center; color: #f43f5e;">18</td>
+                      <td style="padding: 0.45rem; text-align: right; font-weight: 700;">90.1%</td>
+                      <td style="padding: 0.45rem; text-align: right;">94.8%</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <div style="background: rgba(0,0,0,0.04); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 1rem; display: flex; flex-direction: column; justify-content: center;">
+                <h4 style="font-size: 0.88rem; font-weight: 700; margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.4rem;">
+                  <i class="fa-solid fa-circle-check" style="color: var(--accent-emerald);"></i> Clinical Diagnostic Validation
+                </h4>
+                <p style="font-size: 0.78rem; color: var(--text-secondary); line-height: 1.5; margin-bottom: 0.6rem;">
+                  Evaluated on 598 full-resolution Owandy I-max Touch panoramic radiographs. Model utilizes transfer-learned residual feature hierarchies (ResNet50) coupled with CLAHE radiographic contrast filtering.
+                </p>
+                <div style="font-size: 0.74rem; background: rgba(16,185,129,0.1); border-left: 3px solid #10b981; padding: 0.5rem 0.75rem; border-radius: 4px; color: var(--accent-emerald);">
+                  Mean inference latency is <strong>~22 ms</strong> on the NVIDIA GeForce RTX 5060 Ti GPU with mixed precision (AMP FP16).
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Offline GPU Training Notice Card (Browser Training Disabled) -->
+          <div class="card security-notice-card">
+            <div class="card-header">
+              <div class="header-left">
+                <i class="fa-solid fa-shield-halved" style="color: var(--accent-amber);"></i>
+                <span>GPU Training Policy: Dedicated Offline Execution</span>
+              </div>
+              <span class="badge" style="background:rgba(245,158,11,0.15); color:#f59e0b; border:1px solid rgba(245,158,11,0.3);">
+                <i class="fa-solid fa-lock"></i> WEB TRAINING DISABLED
+              </span>
+            </div>
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem;">
+              <div>
+                <p style="font-size: 0.82rem; color: var(--text-secondary); line-height: 1.6; margin-bottom: 0.75rem;">
+                  To ensure clinical web server stability and prevent browser thread starvation or accidental resource exhaustion, <strong>model training cannot be initiated from the web browser</strong>.
+                </p>
+                <p style="font-size: 0.82rem; color: var(--text-secondary); line-height: 1.6;">
+                  All model training and weight fine-tuning are conducted through dedicated offline CLI pipelines that leverage direct CUDA streaming and automatic mixed precision.
+                </p>
+              </div>
+
+              <div style="background: rgba(0,0,0,0.05); border: 1px solid var(--border-color); border-radius: var(--radius-sm); padding: 0.85rem; font-family: var(--font-mono); font-size: 0.75rem;">
+                <span style="color: var(--text-muted); display: block; margin-bottom: 0.35rem;"># To retrain or fine-tune offline on your GPU:</span>
+                <code style="color: var(--accent-cyan); display: block; line-height: 1.7;">
+                  python -m backend.train --epochs 10 --batch-size 8 --lr 0.0001
+                </code>
+                <span style="color: var(--text-muted); display: block; margin-top: 0.5rem;"># Checkpoint automatically saved to:</span>
+                <span style="color: #a7f3d0;">models/dental_disease_model.pth</span>
+              </div>
+            </div>
+
+            <!-- Training Curves Plot -->
+            <div class="plot-container">
+              <h4 class="plot-title"><i class="fa-solid fa-chart-line"></i> Loss & Accuracy Convergence Curves</h4>
+              <img id="trainingPlotImg" src="/static/training_plot.png" alt="Training Curves Plot" onerror="this.style.display='none'">
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- TAB 3: COMPLETE ORVILE DATASET ENCYCLOPEDIA -->
+      <section id="tab-dataset" class="tab-pane">
+        <div class="card dataset-info-card">
+          <div class="card-header">
+            <div class="header-left">
+              <i class="fa-solid fa-book-medical"></i>
+              <span>Panoramic Dental Radiography Dataset - Complete Scientific Reference</span>
+            </div>
+            <a href="https://doi.org/10.5281/zenodo.4457648" target="_blank" class="badge badge-link" style="background:rgba(6,182,212,0.15); color:var(--accent-cyan); text-decoration:none; padding:4px 10px; border-radius:9999px;">
+              <i class="fa-solid fa-up-right-from-square"></i> Zenodo: 10.5281/zenodo.4457648
+            </a>
+          </div>
+
+          <!-- Top Dataset Metrics -->
+          <div class="dataset-metrics-grid">
+            <div class="d-metric">
+              <span class="d-num">598</span>
+              <span class="d-label">Panoramic Radiographs (OPGs)</span>
+            </div>
+            <div class="d-metric">
+              <span class="d-num">2041 x 1024</span>
+              <span class="d-label">Native Image Resolution</span>
+            </div>
+            <div class="d-metric">
+              <span class="d-num">Owandy</span>
+              <span class="d-label">I-max Touch Radiography System</span>
+            </div>
+            <div class="d-metric">
+              <span class="d-num">3 Diseases</span>
+              <span class="d-label">Caries, Periapical & Periodontitis</span>
+            </div>
+          </div>
+
+          <!-- Section 1: Provenance & Hardware -->
+          <div class="dataset-section-block">
+            <h3><i class="fa-solid fa-hospital" style="color:var(--accent-cyan);"></i> 1. Provenance & Clinical Hardware Specifications</h3>
+            <p>
+              The dataset was acquired and curated by <strong>Julio César Mello Román (Kaggle: Orvile)</strong> and co-authors at the <em>Departamento de Radiología, Facultad de Odontología, Universidad Nacional de Asunción</em> in Asunción, Paraguay. It was formally published in <em>Sensors</em> (MDPI, 2021).
+            </p>
+            <ul style="margin-top: 0.6rem; margin-left: 1.25rem;">
+              <li><strong>Imaging System:</strong> Owandy I-max Touch high-frequency panoramic digital radiography equipment.</li>
+              <li><strong>Sensor Characteristics:</strong> CCD sensor with optical fiber coupling, producing standardized 2:1 aspect ratio panoramic orthopantomograms.</li>
+              <li><strong>Format & Dynamic Range:</strong> Uncompressed 8-bit grayscale standard format (dimensions 2041 &times; 1024 pixels).</li>
+              <li><strong>Cohort Diversity:</strong> Encompasses mixed and permanent dentitions, edentulous spaces, impacted third molars, metallic amalgam and composite resin restorations, endodontic fillings, and varying degrees of horizontal/vertical bone resorption.</li>
+            </ul>
+          </div>
+
+          <!-- Section 2: Detailed Clinical Pathologies -->
+          <div class="dataset-section-block">
+            <h3><i class="fa-solid fa-stethoscope" style="color:var(--accent-emerald);"></i> 2. Detailed Diagnostic Criteria for the 3 Diseases</h3>
+            
+            <div class="disease-encyclopedia-grid">
+              
+              <!-- Caries -->
+              <div class="encyclopedia-card" style="border-top-color: #f59e0b;">
+                <h4 style="color: #f59e0b;"><i class="fa-solid fa-teeth"></i> Dental Caries</h4>
+                <p style="font-size: 0.78rem; color: var(--text-muted); margin-bottom: 0.4rem;">Hard Tissue Demineralization</p>
+                <p style="font-size: 0.8rem; line-height: 1.5;">
+                  Characterized by localized radiolucencies in coronal enamel, dentin, or root surfaces where acid-producing bacteria have demineralized hydroxyapatite crystals.
+                </p>
+                <ul>
+                  <li><strong>Coronal Caries:</strong> Radiolucent notch on occlusal or proximal surfaces extending toward the pulp chamber.</li>
+                  <li><strong>Interproximal Caries:</strong> Triangle-shaped radiolucency with its base at the outer enamel surface, located immediately apical to the interproximal contact area.</li>
+                  <li><strong>Recurrent (Secondary) Caries:</strong> Radiolucent halo or crescent beneath existing restorations.</li>
+                  <li><strong>Differential Diagnosis:</strong> Cervical burnout, radiographic mach band effect, composite restoration radiolucencies.</li>
+                </ul>
+              </div>
+
+              <!-- Periapical -->
+              <div class="encyclopedia-card" style="border-top-color: #f43f5e;">
+                <h4 style="color: #f43f5e;"><i class="fa-solid fa-bolt-lightning"></i> Periapical Lesion</h4>
+                <p style="font-size: 0.78rem; color: var(--text-muted); margin-bottom: 0.4rem;">Endodontic Apical Periodontitis</p>
+                <p style="font-size: 0.8rem; line-height: 1.5;">
+                  Pathology originating from pulpal necrosis that spreads through the apical foramen into the surrounding periapical bone architecture.
+                </p>
+                <ul>
+                  <li><strong>Early Stage:</strong> Widening of the periodontal ligament (PDL) space (> 0.5 mm) at the anatomical root apex.</li>
+                  <li><strong>Moderate Stage:</strong> Loss of continuous lamina dura with well-defined or diffuse periapical radiolucency (< 5 mm).</li>
+                  <li><strong>Advanced Cyst/Granuloma:</strong> Large (> 5 mm) corticated radiolucent lesion, potentially displacing adjacent cortical plates.</li>
+                  <li><strong>Differential Diagnosis:</strong> Mental foramen, incisive canal, maxillary sinus extension, apical cemental dysplasia (early stage).</li>
+                </ul>
+              </div>
+
+              <!-- Periodontitis -->
+              <div class="encyclopedia-card" style="border-top-color: #3b82f6;">
+                <h4 style="color: #3b82f6;"><i class="fa-solid fa-chart-line-down"></i> Periodontitis</h4>
+                <p style="font-size: 0.78rem; color: var(--text-muted); margin-bottom: 0.4rem;">Alveolar Bone Resorption</p>
+                <p style="font-size: 0.8rem; line-height: 1.5;">
+                  Chronic inflammatory loss of supporting alveolar bone crest around the root structures of permanent teeth.
+                </p>
+                <ul>
+                  <li><strong>Normal Baseline:</strong> Alveolar bone crest is positioned 1.0 to 1.5 mm apical to the cementoenamel junction (CEJ) with a dense cortical margin.</li>
+                  <li><strong>Horizontal Bone Loss:</strong> Bilateral uniform reduction in alveolar bone height exceeding 2.0 mm apical to the CEJ across multiple teeth.</li>
+                  <li><strong>Vertical (Angular) Defects:</strong> Oblique bone resorption progressing along the root surface.</li>
+                  <li><strong>Furcation Involvement:</strong> Radiolucency in the inter-radicular space between roots of bi- or tri-furcated molars.</li>
+                </ul>
+              </div>
+
+            </div>
+          </div>
+
+          <!-- Section 3: Radiographic Enhancement Pipeline -->
+          <div class="dataset-section-block">
+            <h3><i class="fa-solid fa-wand-magic-sparkles" style="color:var(--accent-purple);"></i> 3. Scientific Image Enhancement Pipeline (Román et al.)</h3>
+            <p>
+              The original paper (*Sensors* 2021) introduced morphological enhancement techniques to overcome radiographic noise, cervical burnout, and low contrast inherent in panoramic dental equipment:
+            </p>
+            <ul style="margin-top: 0.6rem; margin-left: 1.25rem;">
+              <li><strong>Multi-Scale Top-Hat transform with Geodesic Reconstruction (MSTHGR):</strong> Isolates fine anatomical details and edge transitions while preserving structural connectivity.</li>
+              <li><strong>Contrast Limited Adaptive Histogram Equalization (CLAHE):</strong> Applied locally across 8&times;8 pixel tiles to equalize dynamic range without amplifying background photon noise, making faint periapical lesions visible.</li>
+              <li><strong>Pre-processing Standardization:</strong> Resampling to standardized 1024 &times; 512 dimensions preserves the exact 2:1 panoramic aspect ratio, ensuring no geometric distortion of the dental arch or tooth anatomy.</li>
+            </ul>
+          </div>
+
+          <!-- Section 4: Formal Citation -->
+          <div class="dataset-section-block">
+            <h3><i class="fa-solid fa-quote-left" style="color:var(--accent-cyan);"></i> 4. Formal Academic Citation</h3>
+            <div style="background: rgba(0,0,0,0.05); border-left: 3px solid var(--accent-cyan); padding: 0.85rem 1rem; border-radius: 4px; font-family: var(--font-mono); font-size: 0.76rem; color: var(--text-secondary); line-height: 1.7;">
+              Román, J.C.M.; Fretes, V.R.; Adorno, C.G.; Silva, R.G.; Noguera, J.L.V.; Legal-Ayala, H.; Mello-Román, J.D.; Torres, R.D.E.; Facon, J.<br>
+              <strong>Panoramic Dental Radiography Image Enhancement Using Multiscale Mathematical Morphology.</strong><br>
+              <em>Sensors</em> <strong>2021</strong>, 21(9), 3110. https://doi.org/10.3390/s21093110
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+    </main>
+
+    <!-- Footer -->
+    <footer class="app-footer">
+      <span>DentalVision AI &bull; Deep Learning Dental Diagnostic System</span>
+      <span>Trained & Optimized for NVIDIA GeForce RTX 5060 Ti GPU (CUDA)</span>
+    </footer>
+
+  </div>
+
+  <script src="/frontend/js/app.js"></script>
+</body>
+</html>

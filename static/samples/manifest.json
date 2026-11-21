@@ -1,0 +1,87 @@
+[
+  {
+    "id": 1,
+    "title": "Healthy Dentition",
+    "filename": "sample_1.jpg",
+    "url": "/static/samples/sample_1.jpg",
+    "conditions": [
+      "Healthy / Intact Dentition"
+    ],
+    "labels": [
+      0,
+      0,
+      0
+    ]
+  },
+  {
+    "id": 2,
+    "title": "Deep Dental Caries",
+    "filename": "sample_2.jpg",
+    "url": "/static/samples/sample_2.jpg",
+    "conditions": [
+      "Healthy / Intact Dentition"
+    ],
+    "labels": [
+      0,
+      0,
+      0
+    ]
+  },
+  {
+    "id": 3,
+    "title": "Periapical Abscess / Lesion",
+    "filename": "sample_3.jpg",
+    "url": "/static/samples/sample_3.jpg",
+    "conditions": [
+      "Periapical Lesion"
+    ],
+    "labels": [
+      0,
+      1,
+      0
+    ]
+  },
+  {
+    "id": 4,
+    "title": "Generalized Periodontitis",
+    "filename": "sample_4.jpg",
+    "url": "/static/samples/sample_4.jpg",
+    "conditions": [
+      "Dental Caries",
+      "Periapical Lesion"
+    ],
+    "labels": [
+      1,
+      1,
+      0
+    ]
+  },
+  {
+    "id": 5,
+    "title": "Combined Caries & Periapical",
+    "filename": "sample_5.jpg",
+    "url": "/static/samples/sample_5.jpg",
+    "conditions": [
+      "Healthy / Intact Dentition"
+    ],
+    "labels": [
+      0,
+      0,
+      0
+    ]
+  },
+  {
+    "id": 6,
+    "title": "Multi-Disease (Caries + Periapical + Periodontitis)",
+    "filename": "sample_6.jpg",
+    "url": "/static/samples/sample_6.jpg",
+    "conditions": [
+      "Healthy / Intact Dentition"
+    ],
+    "labels": [
+      0,
+      0,
+      0
+    ]
+  }
+]
