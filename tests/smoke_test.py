@@ -123,13 +123,11 @@ def test_css_theme():
     assert "data-theme" in src
 check("CSS Theme Variables (data-theme)", test_css_theme)
 
-# 15. Streamlit CLI-only retraining tab
-def test_streamlit_cli_only():
+# 15. Streamlit retraining tab removed
+def test_streamlit_retraining_removed():
     src = Path("streamlit_app.py").read_text(encoding="utf-8")
-    assert "CLI Only" in src
-    assert "blocked-banner" in src
-    assert "python -m backend.train" in src
-check("Streamlit Retraining Tab (CLI-only blocked)", test_streamlit_cli_only)
+    assert "GPU Retraining" not in src, "GPU Retraining tab must be removed from streamlit_app.py"
+check("Streamlit Retraining Tab Removed", test_streamlit_retraining_removed)
 
 # --- Print Results ---
 print("\n" + "="*55)
