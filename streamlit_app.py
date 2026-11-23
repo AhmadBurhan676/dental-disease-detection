@@ -45,34 +45,37 @@ try:
 except ImportError:
     TORCH_AVAILABLE = False
 
-from backend.model import DISEASE_METADATA, load_trained_model
-from backend.utils import enhance_radiograph_clahe, preprocess_opg, generate_overlay_base64, build_clinical_report
+from backend.model import DISEASE_METADATA, DISEASE_CLASSES, load_trained_model
+from backend.utils import enhance_radiograph_clahe
+from backend.inference import run_inference, run_all_gradcams, overlay_heatmap, composite_heatmap
 
 # ------------------------------------------------------------------------------
-# SINGLE SOURCE OF TRUTH FOR DISEASE CLASSES
+# SINGLE SOURCE OF TRUTH FOR DISEASE CLASSES (driven by backend/model.py)
 # ------------------------------------------------------------------------------
-DISEASE_KEYS = list(DISEASE_METADATA.keys())
+DISEASE_KEYS = DISEASE_CLASSES  # ["Caries", "Deep Caries", "Periapical Lesion", "Impacted"]
 CLASS_ICONS = {
-    "Dental Caries": "caries",
+    "Caries": "caries",
+    "Deep Caries": "caries",
     "Periapical Lesion": "periapical",
-    "Periodontitis": "periodontitis",
+    "Impacted": "tooth",
 }
 CLASS_COLORS = {
-    "Dental Caries": "#F59E0B",
+    "Caries": "#F59E0B",
+    "Deep Caries": "#fb923c",
     "Periapical Lesion": "#F43F5E",
-    "Periodontitis": "var(--accent)"
+    "Impacted": "var(--accent)",
 }
 
 # ------------------------------------------------------------------------------
-# CACHED MODEL RESOURCE
+# CACHED MODEL RESOURCE — returns None if weights not yet trained
 # ------------------------------------------------------------------------------
 @st.cache_resource(show_spinner=False)
 def get_cached_model():
-    """Instantiate and cache the deep learning model across reruns and themes."""
+    """Load and cache the trained model. Returns None if weights are missing."""
     weights_path = MODELS_DIR / "dental_model.pth"
     if weights_path.exists():
         return load_trained_model(str(weights_path))
-    return load_trained_model(None)
+    return None  # No fake predictions when weights are missing
 
 # ------------------------------------------------------------------------------
 # CACHED METRICS DATA LOADER
@@ -87,7 +90,42 @@ def load_metrics_data():
     if not metrics_file.exists():
         return None
     try:
-        return json.loads(metrics_file.read_text(encoding="utf-8"))
+        raw = json.loads(metrics_file.read_text(encoding="utf-8"))
+        # Normalize format: map new evaluate.py output to what the UI expects
+        normalized = {
+            "n_samples_eval": raw.get("n_samples_eval", 0),
+            "macro_auc": raw.get("macro_auc"),
+            "mean_auc_roc": raw.get("macro_auc"),
+            "macro_f1": raw.get("macro_f1"),
+            "macro_precision": raw.get("macro_precision"),
+            "macro_recall": raw.get("macro_recall"),
+            "per_class": raw.get("per_class", {}),
+            "disease_classes": raw.get("disease_classes", DISEASE_KEYS),
+            "is_validated": raw.get("is_validated", False),
+            "is_demo": raw.get("is_fabricated", True),  # mark fabricated metrics as demo
+            "generated_at": raw.get("generated_at", ""),
+            "split": raw.get("split", ""),
+        }
+        # history is in training_history.json, not metrics.json
+        history_file = MODELS_DIR / "training_history.json"
+        if history_file.exists():
+            try:
+                hist_raw = json.loads(history_file.read_text(encoding="utf-8"))
+                # Build history dict for chart
+                per_class_f1 = {}
+                for epoch_data in hist_raw.get("per_class_auc", []):
+                    for cls, auc in (epoch_data or {}).items():
+                        if cls not in per_class_f1:
+                            per_class_f1[cls] = []
+                        per_class_f1[cls].append(auc if auc is not None else 0.0)
+                normalized["history"] = {
+                    "epochs": hist_raw.get("epochs", []),
+                    "val_accuracy": [v * 100 for v in hist_raw.get("val_macro_auc", [])],
+                    "per_class_f1": per_class_f1,
+                }
+            except Exception:
+                pass
+        return normalized
     except Exception:
         return None
 
@@ -175,6 +213,66 @@ def validate_radiograph(image: Image.Image, file_size_bytes: int = 0) -> tuple[b
         return False, f"Uploaded image exhibits high color saturation ({mean_sat:.1f}/255). Dental radiographs are grayscale X-rays. Please upload an authentic radiograph."
 
     return True, ""
+
+
+# ------------------------------------------------------------------------------
+# CLINICAL REPORT BUILDER (uses real model outputs, not hardcoded values)
+# ------------------------------------------------------------------------------
+def _build_report(probs: list) -> dict:
+    """
+    Build a structured clinical report dict from real sigmoid probabilities.
+    probs: list of float, one per DISEASE_CLASSES entry.
+    """
+    diseases = []
+    for idx, cls_name in enumerate(DISEASE_KEYS):
+        prob = float(probs[idx])
+        pct = round(prob * 100, 1)
+        meta = DISEASE_METADATA.get(cls_name, {})
+        if prob >= 0.65:
+            badge = "DETECTED"
+            severity_key = "severe"
+        elif prob >= 0.35:
+            badge = "SUSPICIOUS"
+            severity_key = "moderate"
+        else:
+            badge = "UNLIKELY"
+            severity_key = "mild"
+        severity_levels = meta.get("severity_levels", {})
+        severity_str = severity_levels.get(severity_key, severity_key.title())
+        diseases.append({
+            "disease": cls_name,
+            "category": meta.get("category", "Dental Pathology"),
+            "raw_prob": prob,
+            "probability": pct,
+            "badge": badge,
+            "severity": severity_str,
+            "hallmarks": meta.get("hallmarks", ""),
+            "clinical_guidance": meta.get("clinical_guidance", ""),
+        })
+
+    detected = [d["disease"] for d in diseases if d["badge"] == "DETECTED"]
+    suspicious = [d["disease"] for d in diseases if d["badge"] == "SUSPICIOUS"]
+
+    if detected:
+        overall = "Possible Findings Detected"
+        summary = f"Model identified possible {', '.join(detected)}. Review required by qualified dentist."
+        health_color = "#F43F5E"
+    elif suspicious:
+        overall = "Borderline Findings — Further Review Advised"
+        summary = f"Low-confidence signals for {', '.join(suspicious)}. Clinical correlation recommended."
+        health_color = "#F59E0B"
+    else:
+        overall = "No High-Confidence Findings"
+        summary = "Model did not detect findings above threshold. This does not exclude pathology."
+        health_color = "#10B981"
+
+    return {
+        "overall_health": overall,
+        "summary": summary,
+        "health_color": health_color,
+        "diseases": diseases,
+    }
+
 
 # ------------------------------------------------------------------------------
 # REPORT GENERATION (PNG EXPORT WITH EMBEDDED DISCLAIMER)
@@ -918,18 +1016,18 @@ if "Analysis Studio" in mode:
             s_col1, s_col2, s_col3 = st.columns(3)
             with s_col1:
                 if st.button("Sample 1: Caries", use_container_width=True):
-                    st.session_state["chosen_sample"] = "sample_1.jpg"
+                    st.session_state["chosen_sample"] = "sample_1.png"
             with s_col2:
                 if st.button("Sample 2: Periapical", use_container_width=True):
                     st.session_state["chosen_sample"] = "sample_2.png"
             with s_col3:
-                if st.button("Sample 3: Periodontitis", use_container_width=True):
+                if st.button("Sample 3: Multi-finding", use_container_width=True):
                     st.session_state["chosen_sample"] = "sample_3.png"
 
             sample_options = {
-                "Sample 1: Coronal & Interproximal Caries": "sample_1.jpg",
-                "Sample 2: Periapical Lesion / Apical Periodontitis": "sample_2.png",
-                "Sample 3: Generalized Periodontitis & Bone Loss": "sample_3.png"
+                "Sample 1: Caries & Deep Caries (DENTEX test #33)": "sample_1.png",
+                "Sample 2: Periapical Lesion & Impacted (DENTEX test #38)": "sample_2.png",
+                "Sample 3: Multi-morbidity — Caries, Deep Caries, Periapical (DENTEX test #30)": "sample_3.png"
             }
             default_choice_idx = 0
             if "chosen_sample" in st.session_state:
@@ -962,7 +1060,10 @@ if "Analysis Studio" in mode:
                     st.error(f"Error opening image file: {e}")
 
         if selected_image is not None:
-            with st.spinner("Analyzing radiograph with DentalVision AI..."):
+            model = get_cached_model()
+            model_ready = model is not None
+
+            with st.spinner("Analyzing radiograph..."):
                 np_img_raw = np.array(selected_image.convert("RGB"))
                 np_img = np_img_raw.copy()
                 if enhance_clahe:
@@ -971,42 +1072,40 @@ if "Analysis Studio" in mode:
                     np_img = 255 - np_img
 
                 H, W = np_img.shape[:2]
+                probs = None
+                cams = {}
+                inference_error = None
 
-                h = hash(image_name) % 1000
-                if "sample_1" in image_name:
-                    p_caries, p_peri, p_bone = 0.89, 0.14, 0.12
-                elif "sample_2" in image_name:
-                    p_caries, p_peri, p_bone = 0.18, 0.86, 0.15
-                elif "sample_3" in image_name:
-                    p_caries, p_peri, p_bone = 0.15, 0.22, 0.88
+                if model_ready:
+                    try:
+                        import time as _time
+                        t0 = _time.time()
+                        result = run_inference(model, selected_image)
+                        probs = result["probabilities"]
+                        cams = run_all_gradcams(model, selected_image)
+                        elapsed_ms = (_time.time() - t0) * 1000
+                    except Exception as e:
+                        inference_error = str(e)
                 else:
-                    p_caries = 0.85 if (h % 3 == 0) else 0.15 + (h % 25) / 100.0
-                    p_peri = 0.82 if (h % 4 == 0) else 0.12 + ((h // 3) % 25) / 100.0
-                    p_bone = 0.88 if (h % 5 == 0) else 0.14 + ((h // 5) % 25) / 100.0
+                    inference_error = (
+                        "Model weights not found. Run `python -m backend.train` to train the "
+                        "model first, then restart this app."
+                    )
 
-                probs = [p_caries, p_peri, p_bone]
-                report = build_clinical_report(probs, elapsed_ms=21.4, device_name="DentalVision AI")
-
-                # Generate attention heatmaps
-                cam_caries = np.zeros((H, W), dtype=np.float32)
-                cv2.circle(cam_caries, (int(W * 0.42), int(H * 0.48)), int(H * 0.12), 1.0, -1)
-                cv2.circle(cam_caries, (int(W * 0.68), int(H * 0.52)), int(H * 0.10), 0.9, -1)
-                cam_caries = cv2.GaussianBlur(cam_caries, (81, 81), 0)
-
-                cam_peri = np.zeros((H, W), dtype=np.float32)
-                cv2.circle(cam_peri, (int(W * 0.35), int(H * 0.72)), int(H * 0.14), 1.0, -1)
-                cam_peri = cv2.GaussianBlur(cam_peri, (81, 81), 0)
-
-                cam_bone = np.zeros((H, W), dtype=np.float32)
-                cv2.ellipse(cam_bone, (int(W * 0.5), int(H * 0.58)), (int(W * 0.38), int(H * 0.09)), 0, 0, 360, 1.0, -1)
-                cam_bone = cv2.GaussianBlur(cam_bone, (91, 91), 0)
-
-                composite_cam = (p_caries * cam_caries + p_peri * cam_peri + p_bone * cam_bone) / (sum(probs) + 1e-6)
-
-                heatmap = np.uint8(255 * composite_cam)
-                heatmap_colored = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-                heatmap_rgb = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
-                overlay_display = cv2.addWeighted(np_img, 1.0 - heatmap_opacity, heatmap_rgb, heatmap_opacity, 0)
+                if inference_error:
+                    st.error(f"**Analysis unavailable:** {inference_error}")
+                    report = None
+                    overlay_display = np_img.copy()
+                    composite_cam = np.zeros((H, W), dtype=np.float32)
+                else:
+                    # Build report from real model outputs
+                    report = _build_report(probs)
+                    # Real composite Grad-CAM
+                    if cams:
+                        composite_cam = composite_heatmap(cams, probs)
+                    else:
+                        composite_cam = np.zeros((H, W), dtype=np.float32)
+                    overlay_display = overlay_heatmap(np_img, composite_cam, alpha=heatmap_opacity)
 
             # View modes
             html_block("<div style='margin-top:0.8rem;'></div>")
@@ -1044,96 +1143,107 @@ if "Analysis Studio" in mode:
     with col_diag:
         html_block(f"<h3 style='font-size:1.2rem; font-weight:700; margin-bottom:0.8rem; display:flex; align-items:center; gap:8px; color:var(--text);'>{icon('shield_check', size=20, color='var(--accent)')} 2. Possible Findings</h3>")
         if selected_image is not None:
-            health_color = report.get('health_color', '#10B981')
-            html_block(f"""
-            <div class="clay-card" style="border-left: 6px solid {health_color}; margin-bottom: 1.25rem;">
+            if report is None:
+                # Model not available — already showed error above
+                html_block("""
+                <div class="clay-card" style="text-align:center; padding:2rem 1.5rem;">
+                <h4 style="margin:0 0 0.5rem 0; font-weight:700; color:var(--text);">Model Not Ready</h4>
+                <p style="color:var(--text-muted); font-size:0.88rem; max-width:320px; margin:0 auto;">
+                Train the model first with <code>python -m backend.train</code>,
+                then restart the app to enable real AI analysis.
+                </p>
+                </div>""")
+            else:
+                health_color = report.get('health_color', '#10B981')
+                html_block(f"""
+                <div class="clay-card" style="border-left: 6px solid {health_color}; margin-bottom: 1.25rem;">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.35rem;">
-                    <span style="font-size:0.75rem; text-transform:uppercase; color:var(--text-muted); font-weight:800; letter-spacing:0.06em;">Primary Radiographic Observation</span>
-                    <span class="clay-chip" style="color:var(--accent); font-size:0.72rem;">
-                        {icon("analytics", size=12, color="var(--accent)")} AI Analysis
-                    </span>
+                <span style="font-size:0.75rem; text-transform:uppercase; color:var(--text-muted); font-weight:800; letter-spacing:0.06em;">Primary Radiographic Observation</span>
+                <span class="clay-chip" style="color:var(--accent); font-size:0.72rem;">
+                {icon("analytics", size=12, color="var(--accent)")} AI Analysis
+                </span>
                 </div>
                 <h3 style="color:{health_color}; margin:0.2rem 0 0.4rem 0; font-size:1.35rem; font-weight:800;">{report['overall_health']}</h3>
                 <p style="font-size:0.88rem; margin:0; line-height:1.45; color:var(--text);">{report['summary']}</p>
                 <div style="margin-top:0.75rem; font-size:0.76rem; color:var(--text-muted); display:flex; align-items:center; gap:6px;">
-                    {icon("shield_check", size=13, color="#10B981")} {len(DISEASE_KEYS)} pathologies evaluated &bull; DentalVision AI
+                {icon("shield_check", size=13, color="#10B981")} {len(DISEASE_KEYS)} pathologies evaluated &bull; DentalVision AI
                 </div>
-            </div>
-            """)
-
-            # Confidence Threshold Slider
-            conf_threshold = st.slider(
-                "Filter Findings by Confidence Threshold:",
-                min_value=0.10, max_value=0.90, value=0.25, step=0.05,
-                help="Only show pathology findings whose model confidence meets or exceeds this threshold."
-            )
-
-            # Findings Driven by DISEASE_METADATA
-            displayed_count = 0
-            for idx, d in enumerate(report["diseases"]):
-                if d["raw_prob"] < conf_threshold:
-                    continue
-                displayed_count += 1
-                cls_name = d["disease"]
-                color_code = CLASS_COLORS.get(cls_name, "var(--accent)")
-                icon_key = CLASS_ICONS.get(cls_name, "tooth")
-                badge_level = "high" if d["badge"] == "DETECTED" else ("mod" if d["badge"] == "SUSPICIOUS" else "clear")
-                icon_markup = icon(icon_key, size=22, color=color_code)
-                badge_markup = badge_html(d["badge"], level=badge_level)
-
-                html_block(f"""
-                <div class="clay-card" style="border-left: 5px solid {color_code}; margin-bottom: 0.85rem; padding: 1.15rem 1.3rem;">
-                    <div style="display:flex; justify-content:space-between; align-items:flex-start;">
-                        <div style="display:flex; align-items:center; gap:10px;">
-                            <div style="background:var(--surface); border-radius:12px; width:40px; height:40px; display:flex; align-items:center; justify-content:center; box-shadow:var(--shadow-inset-sm);">
-                                {icon_markup}
-                            </div>
-                            <div>
-                                <span class="disease-title" style="display:block; color:var(--text); font-weight:700;">{idx+1}. {d['disease']}</span>
-                                <span class="disease-sub" style="color:var(--text-muted);">{d['category']}</span>
-                            </div>
-                        </div>
-                        {badge_markup}
-                    </div>
-                    <div style="margin: 0.75rem 0 0.35rem 0; display:flex; justify-content:space-between; font-size:0.82rem;">
-                        <span style="color:var(--text-muted); font-weight:600;">Estimated Probability</span>
-                        <strong style="font-size:0.9rem; color:var(--text);">{d['probability']}%</strong>
-                    </div>
                 </div>
                 """)
-                st.progress(float(d["raw_prob"]))
 
-                with st.expander(f"Clinical Guidance & Hallmarks: {d['disease']}"):
-                    st.markdown(f"**Severity Grade:** {d['severity']}")
-                    st.markdown(f"**Radiographic Hallmarks:** {d['hallmarks']}")
-                    st.markdown(f"**Recommended Follow-up:** {d['clinical_guidance']}")
-
-            if displayed_count == 0:
-                st.info(f"No findings meet the selected {int(conf_threshold*100)}% confidence threshold.")
-
-            # Export Buttons (JSON + PNG printable report)
-            html_block("<div style='margin-top:1.2rem;'></div>")
-            report_png_bytes = generate_report_image(np_img_raw, overlay_display, report, image_name)
-
-            exp_col1, exp_col2 = st.columns(2)
-            with exp_col1:
-                st.download_button(
-                    "Download Report (PNG)",
-                    data=report_png_bytes,
-                    file_name=f"dental_report_{image_name}.png",
-                    mime="image/png",
-                    icon=":material/download:",
-                    use_container_width=True
+                # Confidence Threshold Slider
+                conf_threshold = st.slider(
+                    "Filter Findings by Confidence Threshold:",
+                    min_value=0.10, max_value=0.90, value=0.25, step=0.05,
+                    help="Only show pathology findings whose model confidence meets or exceeds this threshold."
                 )
-            with exp_col2:
-                st.download_button(
-                    "Export Data (JSON)",
-                    data=json.dumps(report, indent=2),
-                    file_name=f"dental_report_{image_name}.json",
-                    mime="application/json",
-                    icon=":material/download:",
-                    use_container_width=True
-                )
+
+                # Findings Driven by DISEASE_METADATA
+                displayed_count = 0
+                for idx, d in enumerate(report["diseases"]):
+                    if d["raw_prob"] < conf_threshold:
+                        continue
+                    displayed_count += 1
+                    cls_name = d["disease"]
+                    color_code = CLASS_COLORS.get(cls_name, "var(--accent)")
+                    icon_key = CLASS_ICONS.get(cls_name, "tooth")
+                    badge_level = "high" if d["badge"] == "DETECTED" else ("mod" if d["badge"] == "SUSPICIOUS" else "clear")
+                    icon_markup = icon(icon_key, size=22, color=color_code)
+                    badge_markup = badge_html(d["badge"], level=badge_level)
+
+                    html_block(f"""
+                    <div class="clay-card" style="border-left: 5px solid {color_code}; margin-bottom: 0.85rem; padding: 1.15rem 1.3rem;">
+                    <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+                    <div style="display:flex; align-items:center; gap:10px;">
+                    <div style="background:var(--surface); border-radius:12px; width:40px; height:40px; display:flex; align-items:center; justify-content:center; box-shadow:var(--shadow-inset-sm);">
+                    {icon_markup}
+                    </div>
+                    <div>
+                    <span class="disease-title" style="display:block; color:var(--text); font-weight:700;">{idx+1}. {d['disease']}</span>
+                    <span class="disease-sub" style="color:var(--text-muted);">{d['category']}</span>
+                    </div>
+                    </div>
+                    {badge_markup}
+                    </div>
+                    <div style="margin: 0.75rem 0 0.35rem 0; display:flex; justify-content:space-between; font-size:0.82rem;">
+                    <span style="color:var(--text-muted); font-weight:600;">Estimated Probability</span>
+                    <strong style="font-size:0.9rem; color:var(--text);">{d['probability']}%</strong>
+                    </div>
+                    </div>
+                    """)
+                    st.progress(float(d["raw_prob"]))
+
+                    with st.expander(f"Clinical Guidance & Hallmarks: {d['disease']}"):
+                        st.markdown(f"**Severity Grade:** {d['severity']}")
+                        st.markdown(f"**Radiographic Hallmarks:** {d['hallmarks']}")
+                        st.markdown(f"**Recommended Follow-up:** {d['clinical_guidance']}")
+
+                if displayed_count == 0:
+                    st.info(f"No findings meet the selected {int(conf_threshold*100)}% confidence threshold.")
+
+                # Export Buttons (JSON + PNG printable report)
+                html_block("<div style='margin-top:1.2rem;'></div>")
+                report_png_bytes = generate_report_image(np_img_raw, overlay_display, report, image_name)
+
+                exp_col1, exp_col2 = st.columns(2)
+                with exp_col1:
+                    st.download_button(
+                        "Download Report (PNG)",
+                        data=report_png_bytes,
+                        file_name=f"dental_report_{image_name}.png",
+                        mime="image/png",
+                        icon=":material/download:",
+                        use_container_width=True
+                    )
+                with exp_col2:
+                    st.download_button(
+                        "Export Data (JSON)",
+                        data=json.dumps(report, indent=2),
+                        file_name=f"dental_report_{image_name}.json",
+                        mime="application/json",
+                        icon=":material/download:",
+                        use_container_width=True
+                    )
         else:
             html_block(f"""
             <div class="clay-card" style="text-align:center; padding:3rem 1.8rem;">
@@ -1192,11 +1302,11 @@ elif "Model Metrics" in mode:
                         {icon("database", size=14, color="var(--text-muted)")} {metrics_data.get("n_samples_eval", 598)} OPG SAMPLES
                     </span>
                     <span class="clay-chip">
-                        ROMÁN ET AL. 2021
+                        DENTEX (MICCAI 2023)
                     </span>
                 </div>
                 <h1 style="margin:0; font-size:1.85rem; font-weight:800; letter-spacing:-0.02em; color:var(--text);">Model Performance & Clinical Evaluation</h1>
-                <p style="margin:4px 0 0 0; font-size:0.88rem; color:var(--text-muted);">Evaluated on the Panoramic Dental Radiography Benchmark Dataset (Zenodo 4457648)</p>
+                <p style="margin:4px 0 0 0; font-size:0.88rem; color:var(--text-muted);">Evaluated on the DENTEX Dataset (Hamamci et al., MICCAI 2023) · ibrahimhamamci/DENTEX on Hugging Face</p>
             </div>
             <div>
                 <span class="clay-chip clay-chip-accent">
@@ -1331,26 +1441,23 @@ elif "Model Metrics" in mode:
             })
         st.table(pd.DataFrame(summary_rows))
 
-# ==============================================================================
-# TAB 3: DATASET INFO
-# ==============================================================================
 elif "Dataset Info" in mode:
     html_block(f"""
     <div class="clay-card-hero">
         <div>
             <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px; flex-wrap:wrap;">
                 <span class="clay-chip" style="color:var(--accent); font-weight:700;">
-                    {icon("database", size=14, color="var(--accent)")} SCIENTIFIC REPOSITORY
+                    {icon("database", size=14, color="var(--accent)")} DENTEX DATASET
                 </span>
-                <span class="clay-chip">ZENODO 4457648</span>
-                <span class="clay-chip">OPEN MEDICAL BENCHMARK</span>
+                <span class="clay-chip">MICCAI 2023 CHALLENGE</span>
+                <span class="clay-chip">CC BY-NC-SA 4.0</span>
             </div>
-            <h1 style="margin:0; font-size:1.85rem; font-weight:800; letter-spacing:-0.02em; color:var(--text);">Panoramic Dental Radiography Dataset</h1>
-            <p style="margin:4px 0 0 0; font-size:0.88rem; color:var(--text-muted);">Curated on Kaggle by Orvile / Published by Román et al. (Sensors 2021)</p>
+            <h1 style="margin:0; font-size:1.85rem; font-weight:800; letter-spacing:-0.02em; color:var(--text);">DENTEX — Dental Enumeration &amp; Diagnosis</h1>
+            <p style="margin:4px 0 0 0; font-size:0.88rem; color:var(--text-muted);">Hamamci et al. (2023) · Hugging Face: ibrahimhamamci/DENTEX · Panoramic OPG Multi-label Dataset</p>
         </div>
         <div>
             <span class="clay-chip" style="color:#10B981; font-weight:700;">
-                {icon("sparkles", size=14, color="#10B981")} Owandy I-max Touch
+                {icon("sparkles", size=14, color="#10B981")} 755 Annotated OPGs
             </span>
         </div>
     </div>
@@ -1360,33 +1467,33 @@ elif "Dataset Info" in mode:
     with c1:
         html_block("""
         <div class="clay-card" style="padding:1.2rem 1.4rem; height:100%; display:flex; flex-direction:column; justify-content:center;">
-            <div style="font-size:0.78rem; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-muted); margin-bottom:4px;">Total Radiographs</div>
-            <div style="font-size:1.85rem; font-weight:800; color:var(--text); line-height:1.2;">598</div>
-            <div style="font-size:0.82rem; color:var(--text-muted); margin-top:6px;">Panoramic OPGs</div>
+            <div style="font-size:0.78rem; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-muted); margin-bottom:4px;">Annotated OPGs</div>
+            <div style="font-size:1.85rem; font-weight:800; color:var(--text); line-height:1.2;">755</div>
+            <div style="font-size:0.82rem; color:var(--text-muted); margin-top:6px;">705 train + 50 test</div>
         </div>
         """)
     with c2:
         html_block("""
         <div class="clay-card" style="padding:1.2rem 1.4rem; height:100%; display:flex; flex-direction:column; justify-content:center;">
             <div style="font-size:0.78rem; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-muted); margin-bottom:4px;">Resolution</div>
-            <div style="font-size:1.65rem; font-weight:800; color:var(--text); line-height:1.2;">2041 &times; 1024</div>
-            <div style="font-size:0.82rem; color:var(--text-muted); margin-top:6px;">Standardized JPEG</div>
+            <div style="font-size:1.5rem; font-weight:800; color:var(--text); line-height:1.2;">~2900 &times; 1316</div>
+            <div style="font-size:0.82rem; color:var(--text-muted); margin-top:6px;">PNG panoramic format</div>
         </div>
         """)
     with c3:
         html_block("""
         <div class="clay-card" style="padding:1.2rem 1.4rem; height:100%; display:flex; flex-direction:column; justify-content:center;">
-            <div style="font-size:0.78rem; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-muted); margin-bottom:4px;">Hardware Source</div>
-            <div style="font-size:1.4rem; font-weight:800; color:var(--text); line-height:1.25; word-break:break-word; white-space:normal;">Owandy I-max Touch</div>
-            <div style="font-size:0.82rem; color:var(--text-muted); margin-top:6px;">Clinical Sensor</div>
+            <div style="font-size:0.78rem; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-muted); margin-bottom:4px;">Institutions</div>
+            <div style="font-size:1.85rem; font-weight:800; color:var(--text); line-height:1.2;">3 Clinics</div>
+            <div style="font-size:0.82rem; color:var(--text-muted); margin-top:6px;">Diverse equipment</div>
         </div>
         """)
     with c4:
         disease_names = " &bull; ".join([k.split()[0] for k in DISEASE_KEYS])
         html_block(f"""
         <div class="clay-card" style="padding:1.2rem 1.4rem; height:100%; display:flex; flex-direction:column; justify-content:center;">
-            <div style="font-size:0.78rem; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-muted); margin-bottom:4px;">Pathologies</div>
-            <div style="font-size:1.85rem; font-weight:800; color:var(--text); line-height:1.2;">{len(DISEASE_KEYS)} Diseases</div>
+            <div style="font-size:0.78rem; font-weight:700; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-muted); margin-bottom:4px;">Annotated Classes</div>
+            <div style="font-size:1.85rem; font-weight:800; color:var(--text); line-height:1.2;">{len(DISEASE_KEYS)} Classes</div>
             <div style="font-size:0.82rem; color:var(--text-muted); margin-top:6px;">{disease_names}</div>
         </div>
         """)
@@ -1402,13 +1509,14 @@ elif "Dataset Info" in mode:
                 {icon("database", size=20, color="var(--accent)")} Scientific Reference &amp; Origin
             </h3>
             <ul style="margin:0; padding-left:1.2rem; font-size:0.88rem; line-height:1.6; color:var(--text);">
-                <li><strong>Dataset Repository:</strong> <a href="https://doi.org/10.5281/zenodo.4457648" target="_blank" style="color:var(--accent); font-weight:600;">Zenodo Record 4457648</a></li>
-                <li><strong>Kaggle Profile:</strong> <strong>Orvile</strong> (Panoramic Dental X-rays)</li>
-                <li><strong>Originating Institution:</strong> <em>Facultad de Odontología, Universidad Nacional de Asunción</em>, Paraguay.</li>
-                <li><strong>Reference Citation:</strong>
+                <li><strong>Dataset:</strong> DENTEX — <a href="https://huggingface.co/datasets/ibrahimhamamci/DENTEX" target="_blank" style="color:var(--accent); font-weight:600;">Hugging Face: ibrahimhamamci/DENTEX</a></li>
+                <li><strong>Challenge:</strong> MICCAI 2023 Dental Enumeration and Diagnosis Challenge</li>
+                <li><strong>License:</strong> CC BY-NC-SA 4.0 (non-commercial research use)</li>
+                <li><strong>Split used:</strong> 705 training images + 50 official validation (as test)</li>
+                <li><strong>Note:</strong> Periodontitis is NOT present in DENTEX annotations and is excluded from this model.</li>
+                <li><strong>Citation:</strong>
                     <blockquote style="margin:0.5rem 0 0 0; border-left:3px solid var(--accent); padding-left:0.8rem; color:var(--text-muted); font-size:0.82rem;">
-                        Román, J.C.M.; Fretes, V.R.; Adorno, C.G.; Silva, R.G.; Noguera, J.L.V.; Legal-Ayala, H.; Mello-Román, J.D.; Torres, R.D.E.; Facon, J.<br>
-                        <em>Panoramic Dental Radiography Image Enhancement Using Multiscale Mathematical Morphology.</em> <strong>Sensors 2021</strong>, 21(9), 3110.
+                        Hamamci, I.E. et al. DENTEX: An Abnormal Tooth Detection with Dental Enumeration and Diagnosis Benchmark for Panoramic X-rays. <em>arXiv:2305.19112</em>, 2023.
                     </blockquote>
                 </li>
             </ul>

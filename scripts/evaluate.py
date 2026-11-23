@@ -1,242 +1,255 @@
-#!/usr/bin/env python3
 """
-scripts/evaluate.py
-===================
-Run a full evaluation pass on the trained DentalVision AI model and write
-  models/metrics.json
-
-Usage
------
-    python scripts/evaluate.py [--split val] [--model models/dental_model.pth]
-
-The script computes per-class F1, precision, recall, specificity, overall
-accuracy, and mean ROC-AUC on the requested dataset split.  It also captures
-the per-epoch history already stored in models/training_metrics.json (if
-present) so the convergence chart in the UI uses real training data.
-
-If no trained model weights are found the script exits with a clear message
-rather than writing placeholder numbers.
+Evaluate trained DentalOPGNet on the DENTEX test set (official 50-image validation with ground truth).
+Writes models/metrics.json with real per-class and macro metrics + 95% bootstrap CIs.
+Generates static/roc_curve.png and static/confusion_matrix.png.
 """
 
-import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-MODELS_DIR = BASE_DIR / "models"
-OUTPUT_PATH = MODELS_DIR / "metrics.json"
-SCHEMA_VERSION = "dentalvision-metrics-v1"
+import numpy as np
+from PIL import Image
 
-CLASSES = ["Dental Caries", "Periapical Lesion", "Periodontitis"]
+try:
+    import torch
+    import torchvision.transforms as T
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    sys.exit("PyTorch required. Install: pip install torch torchvision")
 
+from sklearn.metrics import roc_auc_score, precision_recall_fscore_support, confusion_matrix
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
-# ---------------------------------------------------------------------------
-# Argument parsing
-# ---------------------------------------------------------------------------
-def parse_args():
-    p = argparse.ArgumentParser(description="Evaluate DentalVision AI and write models/metrics.json")
-    p.add_argument("--split", default="val", choices=["val", "test"], help="Dataset split to evaluate on (default: val)")
-    p.add_argument("--model", default=str(MODELS_DIR / "dental_model.pth"), help="Path to trained model weights")
-    p.add_argument("--threshold", type=float, default=0.5, help="Classification threshold (default: 0.5)")
-    p.add_argument("--baseline", default=str(MODELS_DIR / "baseline_metrics.json"),
-                   help="Optional path to a baseline metrics.json from an earlier run, used for delta display in UI")
-    p.add_argument("--validated", action="store_true", default=True,
-                   help="Mark result as validated (shows 'Evaluation Results' badge in UI)")
-    return p.parse_args()
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from backend.model import DISEASE_CLASSES, load_trained_model
+from backend.dataset_prep import setup_dataset, load_splits, VALIDATION_IMAGE_DIR
 
+MODELS_DIR = Path("models")
+STATIC_DIR = Path("static")
+STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
-# ---------------------------------------------------------------------------
-# Metric helpers
-# ---------------------------------------------------------------------------
-def compute_binary_metrics(y_true, y_pred_prob, threshold=0.5):
-    """
-    y_true, y_pred_prob: 1-D lists or numpy arrays of length N.
-    Returns dict with tp, fp, fn, tn, precision, recall, f1, specificity.
-    """
-    import numpy as np
-    y_true = np.array(y_true, dtype=int)
-    y_pred = (np.array(y_pred_prob) >= threshold).astype(int)
-    tp = int(((y_pred == 1) & (y_true == 1)).sum())
-    fp = int(((y_pred == 1) & (y_true == 0)).sum())
-    fn = int(((y_pred == 0) & (y_true == 1)).sum())
-    tn = int(((y_pred == 0) & (y_true == 0)).sum())
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-    recall    = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    f1        = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
-    return dict(tp=tp, fp=fp, fn=fn, tn=tn,
-                precision=round(precision, 4),
-                recall=round(recall, 4),
-                f1=round(f1, 4),
-                specificity=round(specificity, 4))
+EVAL_H, EVAL_W = 256, 512
 
 
-def compute_auc(y_true, y_scores):
-    try:
-        from sklearn.metrics import roc_auc_score
-        import numpy as np
-        return round(float(roc_auc_score(y_true, y_scores)), 4)
-    except Exception:
-        return None
+def preprocess(img_path: Path) -> "torch.Tensor":
+    transform = T.Compose([
+        T.Resize((EVAL_H, EVAL_W)),
+        T.ToTensor(),
+        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+    img = Image.open(img_path).convert("RGB")
+    return transform(img).unsqueeze(0)
 
 
-# ---------------------------------------------------------------------------
-# History from existing training_metrics.json
-# ---------------------------------------------------------------------------
-def load_existing_history():
-    p = MODELS_DIR / "training_metrics.json"
-    if not p.exists():
-        return None
-    try:
-        data = json.loads(p.read_text())
-        h = data.get("history", {})
-        if not h:
-            return None
-        return {
-            "epochs":       h.get("epochs", []),
-            "train_loss":   h.get("train_loss", []),
-            "val_loss":     h.get("val_loss", []),
-            "val_accuracy": h.get("val_accuracy", []),
-            "per_class_f1": {
-                "Dental Caries":    h.get("caries_f1", []),
-                "Periapical Lesion":h.get("periapical_f1", []),
-                "Periodontitis":    h.get("periodontitis_f1", []),
-            }
-        }
-    except Exception:
-        return None
+def bootstrap_auc(labels, probs, n_boot=1000, ci=0.95):
+    """95% bootstrap CI for AUC-ROC."""
+    rng = np.random.default_rng(42)
+    n = len(labels)
+    aucs = []
+    for _ in range(n_boot):
+        idx = rng.integers(0, n, size=n)
+        lb, pb = labels[idx], probs[idx]
+        if lb.sum() == 0 or lb.sum() == n:
+            continue
+        try:
+            aucs.append(roc_auc_score(lb, pb))
+        except Exception:
+            pass
+    if not aucs:
+        return None, None
+    lo = np.percentile(aucs, (1 - ci) / 2 * 100)
+    hi = np.percentile(aucs, (1 + ci) / 2 * 100)
+    return round(float(lo), 4), round(float(hi), 4)
 
 
-# ---------------------------------------------------------------------------
-# Baseline loader
-# ---------------------------------------------------------------------------
-def load_baseline(path: str):
-    try:
-        return json.loads(Path(path).read_text())
-    except Exception:
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Main evaluation loop
-# ---------------------------------------------------------------------------
-def main():
-    args = parse_args()
-    model_path = Path(args.model)
-
-    if not model_path.exists():
-        print(f"[ERROR] Model weights not found at {model_path}")
-        print("  Train the model first with:  python backend/train.py")
-        print("  Then re-run this script.")
+def evaluate():
+    weights_path = MODELS_DIR / "dental_model.pth"
+    if not weights_path.exists():
+        print("ERROR: models/dental_model.pth not found.")
+        print("Run 'python -m backend.train' first.")
         sys.exit(1)
 
-    print(f"Loading model from {model_path} ...")
-    sys.path.insert(0, str(BASE_DIR))
-
-    try:
-        import torch
-        from backend.model import DentalOPGNet, DISEASE_METADATA
-    except ImportError as e:
-        print(f"[ERROR] Import failed: {e}")
+    device = "cuda" if (TORCH_AVAILABLE and torch.cuda.is_available()) else "cpu"
+    model = load_trained_model(str(weights_path), device=device)
+    if model is None:
+        print("ERROR: Could not load model weights.")
         sys.exit(1)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = DentalOPGNet(num_classes=len(CLASSES), pretrained=False)
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    # Load test split
+    try:
+        splits = load_splits()
+    except FileNotFoundError:
+        splits = setup_dataset()
+    test_recs = splits.get("test", [])
+    if not test_recs:
+        print("ERROR: No test records found in data/splits.json.")
+        sys.exit(1)
+
+    print(f"[Eval] Evaluating on {len(test_recs)} test images...")
     model.eval()
-    model.to(device)
+    all_probs, all_labels = [], []
+    t0 = time.time()
+    missing = 0
 
-    # ----------------------------------------------------------------
-    # Load dataset
-    # ----------------------------------------------------------------
-    from backend.dataset_prep import get_dataloader
-    loader = get_dataloader(split=args.split, batch_size=16, shuffle=False)
+    for rec in test_recs:
+        img_path = VALIDATION_IMAGE_DIR / rec["filename"]
+        if not img_path.exists():
+            missing += 1
+            continue
+        tensor = preprocess(img_path).to(device)
+        with torch.no_grad():
+            logits = model(tensor)
+            probs = torch.sigmoid(logits).squeeze(0).cpu().numpy()
+        all_probs.append(probs)
+        all_labels.append(rec["labels"])
 
-    all_probs = {c: [] for c in CLASSES}
-    all_labels = {c: [] for c in CLASSES}
-    correct_total = 0
-    total_samples = 0
+    if missing > 0:
+        print(f"[Eval] WARNING: {missing} images not found — skipped.")
 
-    with torch.no_grad():
-        for images, labels in loader:
-            images = images.to(device)
-            outputs = torch.sigmoid(model(images))
-            preds = outputs.cpu().numpy()
-            lbl   = labels.cpu().numpy()
-            for i, cls in enumerate(CLASSES):
-                all_probs[cls].extend(preds[:, i].tolist())
-                all_labels[cls].extend(lbl[:, i].tolist())
+    if not all_probs:
+        print("ERROR: No images could be evaluated.")
+        sys.exit(1)
 
-            # overall accuracy: image-level (at least one class correct at threshold)
-            import numpy as np
-            pred_binary = (preds >= args.threshold).astype(int)
-            lbl_binary  = (lbl >= 0.5).astype(int)
-            correct_total += int((pred_binary == lbl_binary).all(axis=1).sum())
-            total_samples += images.shape[0]
+    all_probs_np = np.array(all_probs, dtype=np.float32)
+    all_labels_np = np.array(all_labels, dtype=np.float32)
+    elapsed = time.time() - t0
+    n_eval = len(all_probs)
 
-    # ----------------------------------------------------------------
-    # Per-class metrics
-    # ----------------------------------------------------------------
+    # --- Per-class metrics ---
+    preds = (all_probs_np >= 0.5).astype(int)
     per_class = {}
     auc_values = []
-    baseline = load_baseline(args.baseline)
-
-    for cls in CLASSES:
-        m = compute_binary_metrics(all_labels[cls], all_probs[cls], args.threshold)
-        auc = compute_auc(all_labels[cls], all_probs[cls])
-        if auc is not None:
-            auc_values.append(auc)
-
-        entry = {
-            "f1":          m["f1"],
-            "precision":   m["precision"],
-            "recall":      m["recall"],
-            "specificity": m["specificity"],
-            "auc_roc":     auc,
-            "tp":          m["tp"],
-            "fp":          m["fp"],
-            "fn":          m["fn"],
-            # baselines (from optional baseline file)
-            "baseline_f1": None,
+    for i, cls in enumerate(DISEASE_CLASSES):
+        y_true = all_labels_np[:, i].astype(int)
+        y_pred = preds[:, i]
+        y_prob = all_probs_np[:, i]
+        prec, rec, f1, _ = precision_recall_fscore_support(
+            y_true, y_pred, average="binary", zero_division=0
+        )
+        tp = int((y_pred * y_true).sum())
+        fp = int((y_pred * (1 - y_true)).sum())
+        fn = int(((1 - y_pred) * y_true).sum())
+        tn = int(((1 - y_pred) * (1 - y_true)).sum())
+        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+        if y_true.sum() > 0:
+            try:
+                auc = roc_auc_score(y_true, y_prob)
+                auc_lo, auc_hi = bootstrap_auc(y_true, y_prob)
+                auc_values.append(auc)
+            except Exception:
+                auc, auc_lo, auc_hi = None, None, None
+        else:
+            auc, auc_lo, auc_hi = None, None, None
+        per_class[cls] = {
+            "auc": round(float(auc), 4) if auc is not None else None,
+            "auc_ci_lo": auc_lo,
+            "auc_ci_hi": auc_hi,
+            "precision": round(float(prec), 4),
+            "recall": round(float(rec), 4),
+            "f1": round(float(f1), 4),
+            "specificity": round(float(specificity), 4),
+            "tp": tp, "fp": fp, "fn": fn, "tn": tn,
+            "n_positive": int(y_true.sum()),
         }
-        if baseline and cls in baseline.get("per_class", {}):
-            entry["baseline_f1"] = baseline["per_class"][cls].get("f1")
-        per_class[cls] = entry
 
-    overall_acc = round(100.0 * correct_total / total_samples, 1) if total_samples else None
-    mean_auc    = round(sum(auc_values) / len(auc_values), 4) if auc_values else None
+    macro_auc = round(float(np.mean(auc_values)), 4) if auc_values else None
 
-    # ----------------------------------------------------------------
-    # Assemble output
-    # ----------------------------------------------------------------
-    history = load_existing_history()
-
-    output = {
-        "_schema": SCHEMA_VERSION,
-        "_note": "Generated by scripts/evaluate.py. Do not edit manually.",
-        "validated": args.validated,
-        "evaluation_split": args.split,
-        "dataset": "Orvile / Román et al. Sensors 2021 (Zenodo 4457648)",
-        "n_samples_eval": total_samples,
-        "baseline_label": "baseline model (epoch 1)" if baseline else None,
-        "classes": CLASSES,
-        "overall_accuracy": overall_acc,
-        "mean_auc_roc": mean_auc,
-        "baseline_overall_accuracy": baseline.get("overall_accuracy") if baseline else None,
-        "baseline_mean_auc_roc": baseline.get("mean_auc_roc") if baseline else None,
+    metrics = {
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "n_samples_eval": n_eval,
+        "split": "test (DENTEX official validation — 50 images with ground truth)",
+        "threshold": 0.5,
+        "disease_classes": DISEASE_CLASSES,
+        "macro_auc": macro_auc,
+        "macro_f1": round(float(np.mean([v["f1"] for v in per_class.values()])), 4),
+        "macro_precision": round(float(np.mean([v["precision"] for v in per_class.values()])), 4),
+        "macro_recall": round(float(np.mean([v["recall"] for v in per_class.values()])), 4),
         "per_class": per_class,
-        "history": history,
+        "elapsed_seconds": round(elapsed, 2),
+        "is_fabricated": False,
+        "is_validated": True,
     }
 
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_PATH.write_text(json.dumps(output, indent=2))
-    print(f"[OK] Wrote {OUTPUT_PATH}")
-    print(f"     Overall accuracy : {overall_acc}%")
-    print(f"     Mean AUC-ROC     : {mean_auc}")
-    for cls in CLASSES:
-        print(f"     {cls:22s} F1={per_class[cls]['f1']:.3f}")
+    out_path = MODELS_DIR / "metrics.json"
+    with open(out_path, "w") as f:
+        json.dump(metrics, f, indent=2)
+    print(f"[Eval] Saved metrics to {out_path}")
+    print(f"[Eval] macro_auc={macro_auc} macro_f1={metrics['macro_f1']}")
+
+    # --- ROC curve ---
+    _plot_roc(all_labels_np, all_probs_np)
+    # --- Confusion matrix (per class binary) ---
+    _plot_confusion(all_labels_np, preds)
+
+    return metrics
+
+
+def _plot_roc(labels, probs):
+    from sklearn.metrics import roc_curve
+    fig, ax = plt.subplots(figsize=(8, 6))
+    fig.patch.set_facecolor("#1e293b")
+    ax.set_facecolor("#1e293b")
+    colors = ["#F59E0B", "#fb923c", "#F43F5E", "#6366F1"]
+    for i, (cls, col) in enumerate(zip(DISEASE_CLASSES, colors)):
+        y_true = labels[:, i].astype(int)
+        if y_true.sum() == 0:
+            continue
+        fpr, tpr, _ = roc_curve(y_true, probs[:, i])
+        try:
+            auc = roc_auc_score(y_true, probs[:, i])
+        except Exception:
+            auc = 0.0
+        ax.plot(fpr, tpr, label=f"{cls} (AUC={auc:.3f})", color=col, linewidth=2)
+    ax.plot([0, 1], [0, 1], "w--", linewidth=1, alpha=0.5)
+    ax.set_xlabel("False Positive Rate", color="white")
+    ax.set_ylabel("True Positive Rate", color="white")
+    ax.set_title("ROC Curves — DENTEX Test Set", color="white", fontweight="bold")
+    ax.tick_params(colors="white")
+    ax.legend(loc="lower right", facecolor="#334155", labelcolor="white")
+    for spine in ax.spines.values():
+        spine.set_edgecolor("#475569")
+    out = STATIC_DIR / "roc_curve.png"
+    fig.savefig(out, bbox_inches="tight", dpi=150, facecolor=fig.get_facecolor())
+    plt.close(fig)
+    print(f"[Eval] Saved ROC curve to {out}")
+
+
+def _plot_confusion(labels, preds):
+    n_cls = len(DISEASE_CLASSES)
+    fig, axes = plt.subplots(1, n_cls, figsize=(5 * n_cls, 4))
+    fig.patch.set_facecolor("#1e293b")
+    if n_cls == 1:
+        axes = [axes]
+    for i, (cls, ax) in enumerate(zip(DISEASE_CLASSES, axes)):
+        y_true = labels[:, i].astype(int)
+        y_pred = preds[:, i]
+        cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+        im = ax.imshow(cm, interpolation="nearest", cmap="Blues")
+        ax.set_title(cls, color="white", fontsize=11, fontweight="bold")
+        ax.set_xlabel("Predicted", color="white")
+        ax.set_ylabel("True", color="white")
+        ax.set_xticks([0, 1])
+        ax.set_yticks([0, 1])
+        ax.set_xticklabels(["Neg", "Pos"], color="white")
+        ax.set_yticklabels(["Neg", "Pos"], color="white")
+        ax.tick_params(colors="white")
+        for r in range(2):
+            for c in range(2):
+                ax.text(c, r, str(cm[r, c]), ha="center", va="center",
+                        color="white", fontsize=14, fontweight="bold")
+        ax.set_facecolor("#1e293b")
+    fig.suptitle("Confusion Matrices — DENTEX Test Set", color="white",
+                 fontsize=14, fontweight="bold")
+    out = STATIC_DIR / "confusion_matrix.png"
+    fig.savefig(out, bbox_inches="tight", dpi=150, facecolor=fig.get_facecolor())
+    plt.close(fig)
+    print(f"[Eval] Saved confusion matrix to {out}")
 
 
 if __name__ == "__main__":
-    main()
+    evaluate()

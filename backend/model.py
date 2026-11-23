@@ -1,10 +1,8 @@
 """
-PyTorch Deep Learning Model Architecture for Dental OPG Disease Detection
-Supports multi-label detection for:
-1. Dental Caries
-2. Periapical Lesion
-3. Periodontitis
-With built-in Grad-CAM explainable AI visualization for dental diagnostics.
+PyTorch Model Architecture for Dental OPG Disease Detection (DENTEX classes).
+Multi-label ResNet50 for: Caries, Deep Caries, Periapical Lesion, Impacted.
+No Periodontitis — not present in DENTEX ground-truth.
+Built-in Grad-CAM for real gradient-based saliency maps.
 """
 
 import sys
@@ -23,168 +21,173 @@ except ImportError:
 
 import numpy as np
 import cv2
-from PIL import Image
+
+# ---------------------------------------------------------------------------
+# SINGLE SOURCE OF TRUTH — matches backend/dataset_prep.py exactly
+# ---------------------------------------------------------------------------
+DISEASE_CLASSES = ["Caries", "Deep Caries", "Periapical Lesion", "Impacted"]
+NUM_CLASSES = len(DISEASE_CLASSES)
 
 DISEASE_METADATA = {
-    "Dental Caries": {
+    "Caries": {
         "index": 0,
-        "name": "Dental Caries",
+        "name": "Caries",
         "category": "Hard Tissue Pathology",
         "description": "Demineralization of enamel and dentin causing coronal or interproximal radiolucencies.",
         "hallmarks": "Crown radiolucency, shadow under existing fillings, occlusal pit breakdown.",
         "severity_levels": {
             "mild": "Incipient enamel lesion (non-cavitated)",
             "moderate": "Dentin involvement without pulp exposure",
-            "severe": "Deep dentinal caries approaching or exposing pulp chamber"
+            "severe": "Deep dentinal caries approaching or exposing pulp",
         },
-        "clinical_guidance": "Bitewing confirmation, minimally invasive restoration (composite resin), fluoride varnish, or indirect pulp capping depending on depth."
+        "clinical_guidance": (
+            "Bitewing confirmation, minimally invasive restoration, fluoride varnish, "
+            "or indirect pulp capping depending on depth."
+        ),
+    },
+    "Deep Caries": {
+        "index": 1,
+        "name": "Deep Caries",
+        "category": "Hard Tissue Pathology",
+        "description": "Advanced caries approaching or reaching the pulp chamber.",
+        "hallmarks": "Extensive radiolucency involving dentin, possible pulp horn exposure.",
+        "severity_levels": {
+            "moderate": "Dentin involvement nearing pulp",
+            "severe": "Pulp exposure or near-exposure",
+        },
+        "clinical_guidance": (
+            "Indirect or direct pulp capping, root canal treatment, or extraction "
+            "depending on restorability and pulp vitality."
+        ),
     },
     "Periapical Lesion": {
-        "index": 1,
+        "index": 2,
         "name": "Periapical Lesion",
         "category": "Endodontic Pathology",
-        "description": "Periapical radiolucency surrounding the root apex indicating pulpal necrosis, granuloma, or periapical abscess.",
-        "hallmarks": "Loss of lamina dura at apex, widening of periodontal ligament (PDL) space, radiolucent halo around root tip.",
+        "description": "Periapical radiolucency indicating pulpal necrosis, granuloma, or abscess.",
+        "hallmarks": "Loss of lamina dura, widened PDL space, radiolucent halo around root tip.",
         "severity_levels": {
-            "mild": "Widened apical PDL space (< 1mm)",
-            "moderate": "Distinct periapical radiolucency (< 5mm, localized granuloma)",
-            "severe": "Large periapical cyst or diffuse apical osteitis (> 5mm) with cortical expansion"
+            "mild": "Widened apical PDL space (< 1 mm)",
+            "moderate": "Distinct periapical radiolucency < 5 mm",
+            "severe": "Large periapical cyst or diffuse osteitis > 5 mm",
         },
-        "clinical_guidance": "Pulp vitality testing (cold/electric), root canal treatment (endodontic therapy), or surgical apicoectomy if persistent."
+        "clinical_guidance": (
+            "Pulp vitality testing, root canal treatment, or surgical apicoectomy if persistent."
+        ),
     },
-    "Periodontitis": {
-        "index": 2,
-        "name": "Periodontitis",
-        "category": "Periodontal Pathology",
-        "description": "Progressive loss of alveolar crest bone support around the teeth due to chronic periodontal infection.",
-        "hallmarks": "Horizontal or vertical bone resorption >2mm apical to the cementoenamel junction (CEJ), furcation involvement.",
+    "Impacted": {
+        "index": 3,
+        "name": "Impacted",
+        "category": "Developmental Pathology",
+        "description": "Tooth that has failed to erupt into its normal position in the dental arch.",
+        "hallmarks": "Tooth visible in bone but not erupted; often seen with third molars.",
         "severity_levels": {
-            "mild": "Stage I: 1-2 mm clinical attachment loss / mild crestal blunting",
-            "moderate": "Stage II: 3-4 mm loss / horizontal bone resorption extending to coronal third",
-            "severe": "Stage III/IV: >= 5 mm loss / vertical bone defects, furcation involvement, tooth mobility risk"
+            "mild": "Soft tissue impaction",
+            "moderate": "Partial bony impaction",
+            "severe": "Complete bony impaction",
         },
-        "clinical_guidance": "Comprehensive periodontal charting, Scaling and Root Planing (SRP), antimicrobials, and periodontal maintenance every 3 months."
-    }
+        "clinical_guidance": (
+            "Clinical and radiographic assessment; surgical extraction depending on symptoms, "
+            "angulation, and adjacent tooth risk."
+        ),
+    },
 }
+
 
 class DentalOPGNet(nn.Module if TORCH_AVAILABLE else object):
     """
-    State-of-the-art Deep Convolutional Neural Network for Dental Radiography.
-    Uses ResNet50 backbone with specialized multi-disease classification head.
+    ResNet50-based multi-label classifier for panoramic dental radiographs.
+    Outputs raw logits (apply sigmoid for probabilities).
+    Supports real Grad-CAM via registered forward/backward hooks.
     """
-    def __init__(self, num_classes=3, pretrained=True):
-        super(DentalOPGNet, self).__init__()
-        
-        # ResNet50 backbone
+
+    def __init__(self, num_classes: int = NUM_CLASSES, pretrained: bool = True):
+        super().__init__()
         weights = models.ResNet50_Weights.DEFAULT if pretrained else None
-        base_model = models.resnet50(weights=weights)
-        
-        # Backbone feature extractor
+        base = models.resnet50(weights=weights)
+
         self.features = nn.Sequential(
-            base_model.conv1,
-            base_model.bn1,
-            base_model.relu,
-            base_model.maxpool,
-            base_model.layer1,
-            base_model.layer2,
-            base_model.layer3,
-            base_model.layer4
+            base.conv1, base.bn1, base.relu, base.maxpool,
+            base.layer1, base.layer2, base.layer3, base.layer4,
         )
-        
-        # Adaptive pooling to handle varying panoramic aspect ratios
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        
-        # Disease classification head
-        in_features = base_model.fc.in_features  # 2048
+
+        in_features = base.fc.in_features  # 2048
         self.classifier = nn.Sequential(
             nn.Dropout(p=0.4),
             nn.Linear(in_features, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(inplace=True),
             nn.Dropout(p=0.3),
-            nn.Linear(512, num_classes)
+            nn.Linear(512, num_classes),
         )
-        
-        # Hooks for Grad-CAM
-        self.gradients = None
-        self.activations = None
-        self._register_hooks()
 
-    def _register_hooks(self):
-        def forward_hook(module, input, output):
-            self.activations = output
+        self._gradients = None
+        self._activations = None
+        self._register_cam_hooks()
 
-        def backward_hook(module, grad_input, grad_output):
-            self.gradients = grad_output[0]
+    def _register_cam_hooks(self):
+        def fwd(module, inp, out):
+            self._activations = out
 
-        # Target layer is layer4 (the last convolutional block in ResNet50)
-        target_layer = self.features[7]
-        target_layer.register_forward_hook(forward_hook)
-        target_layer.register_full_backward_hook(backward_hook)
+        def bwd(module, grad_in, grad_out):
+            self._gradients = grad_out[0]
+
+        self.features[7].register_forward_hook(fwd)
+        self.features[7].register_full_backward_hook(bwd)
 
     def forward(self, x):
         feat = self.features(x)
         pooled = self.avgpool(feat)
         flat = torch.flatten(pooled, 1)
-        logits = self.classifier(flat)
-        return logits
+        return self.classifier(flat)
 
-    def generate_gradcam(self, input_tensor, target_class_idx):
-        """
-        Generate Grad-CAM activation heatmap for a specific disease class index (0, 1, or 2).
-        """
+    def generate_gradcam(self, input_tensor, target_class_idx: int) -> np.ndarray:
+        """Compute real Grad-CAM heatmap. Returns float32 (H, W) in [0, 1]."""
         self.eval()
         self.zero_grad()
-        
-        # Forward pass
         logits = self.forward(input_tensor)
         score = logits[0, target_class_idx]
-        
-        # Backward pass
         score.backward(retain_graph=True)
-        
-        # Gradients and activations
-        gradients = self.gradients
-        activations = self.activations
-        
-        if gradients is None or activations is None:
-            # Fallback uniform map if hooks fail
-            return np.zeros((input_tensor.shape[2], input_tensor.shape[3]), dtype=np.float32)
 
-        # Global average pooling of gradients
-        weights = torch.mean(gradients, dim=(2, 3), keepdim=True)
-        
-        # Weighted combination of activation maps
-        cam = torch.sum(weights * activations, dim=1).squeeze(0)
-        cam = F.relu(cam)  # Apply ReLU
-        
+        grads = self._gradients
+        acts = self._activations
+        if grads is None or acts is None:
+            H, W = input_tensor.shape[2], input_tensor.shape[3]
+            return np.zeros((H, W), dtype=np.float32)
+
+        weights = torch.mean(grads, dim=(2, 3), keepdim=True)
+        cam = torch.sum(weights * acts, dim=1).squeeze(0)
+        cam = F.relu(cam)
         cam = cam.detach().cpu().numpy()
-        cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)  # Normalize [0, 1]
-        
-        # Resize CAM to match input tensor resolution
-        cam_resized = cv2.resize(cam, (input_tensor.shape[3], input_tensor.shape[2]))
-        return cam_resized
+        cam -= cam.min()
+        cam /= (cam.max() + 1e-8)
+        H, W = input_tensor.shape[2], input_tensor.shape[3]
+        return cv2.resize(cam, (W, H))
+
 
 def load_trained_model(weights_path=None, device=None):
+    """
+    Load DentalOPGNet. Returns None if weights missing or invalid.
+    NEVER silently falls back to fake predictions.
+    """
+    if not TORCH_AVAILABLE:
+        return None
+
     if device is None:
-        device = "cuda" if (TORCH_AVAILABLE and torch and torch.cuda.is_available()) else "cpu"
-    """Instantiate and load DentalOPGNet."""
-    model = DentalOPGNet(num_classes=3, pretrained=True)
-    if weights_path and torch.cuda.is_available():
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    model = DentalOPGNet(num_classes=NUM_CLASSES, pretrained=(weights_path is None))
+
+    if weights_path:
         try:
             state = torch.load(weights_path, map_location=device)
             model.load_state_dict(state.get("model_state_dict", state))
-            print(f"[Model] Successfully loaded weights from {weights_path}")
+            print(f"[Model] Loaded weights from {weights_path}")
         except Exception as e:
-            print(f"[Model] Could not load weights from {weights_path}: {e}. Initializing base model.")
-    elif weights_path:
-        try:
-            state = torch.load(weights_path, map_location="cpu")
-            model.load_state_dict(state.get("model_state_dict", state))
-            print(f"[Model] Successfully loaded weights from {weights_path} on CPU.")
-        except Exception as e:
-            print(f"[Model] Weight load note: {e}")
-            
+            print(f"[Model] WARNING: Could not load weights from {weights_path}: {e}")
+            return None
+
     model.to(device)
     model.eval()
     return model
